@@ -1,5 +1,5 @@
 GCC     ?= gcc
-CFLAGS  ?= -g -Wall -Wextra
+CFLAGS  ?= -g -Wall -Wextra -D_GNU_SOURCE
 LDFLAGS ?=
 
 recursive_copy: recursive_copy.o

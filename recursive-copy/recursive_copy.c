@@ -164,10 +164,47 @@ int file_op_mkdir_cb(const char* dir)
     if (chmod(dir, st.st_mode & 07777))
         error_msg("Failed to chmod for directory %s", dir);
 
+    if (chown(dir, st.st_uid, st.st_gid))
+        error_msg("Failed to chown for directory %s", dir);
+
     timebuf.actime = st.st_atime;
     timebuf.modtime = st.st_mtime;
     if (utime(dir, &timebuf)) {
         error_msg("Failed to change file %s's access and modification times", dir);
+        return -1;
+    }
+
+    return 0;
+}
+
+int copy_sparse_file(const char* filename, void* dest, void* src, size_t size, int src_fd)
+{
+    off_t data_start = 0, hole_start;
+
+    if (lseek(src_fd, 0, SEEK_SET) < 0) {
+        error_msg("Failed to seek file %s", filename);
+        return -1;
+    }
+
+    errno = 0;
+    while ((data_start = lseek(src_fd, data_start, SEEK_DATA)) >= 0) {
+        hole_start = lseek(src_fd, data_start, SEEK_HOLE);
+        if (hole_start < 0) {
+            if (errno == ENXIO) {
+                error_msg("File %s has changed during copy", filename);
+                return -1;
+            }
+
+            memcpy(dest + data_start, src + data_start, size - data_start);
+            data_start = size;
+        } else {
+            memcpy(dest + data_start, src + data_start, hole_start - data_start);
+            data_start = hole_start;
+        }
+    }
+
+    if (errno != ENXIO) {
+        error_msg("Failed to seek file %s", filename);
         return -1;
     }
 
@@ -237,14 +274,24 @@ int file_op(const char* dir, const char* name, struct dirent* ent)
             goto out4;
         }
 
+        if (posix_fadvise(dest_fd, 0, st.st_size, POSIX_FADV_DONTNEED))
+            error_msg("Failed to advise the kernel about the likely sequential pattern to access to %s", dest_path);
+
         if ((dest_map = mmap(NULL, st.st_size, PROT_READ | PROT_WRITE, MAP_SHARED, dest_fd, 0)) == MAP_FAILED) {
             error_msg("Failed to mmap dest file %s", dest_path);
             err = -1;
             goto out4;
         }
 
-        memcpy(dest_map, map, st.st_size);
+        if ((long long)st.st_blocks * st.st_blksize < st.st_size) {
+            if ((err = copy_sparse_file(dest_path, dest_map, map, st.st_size, fd))) {
+                goto out5;
+            }
+        } else {
+            memcpy(dest_map, map, st.st_size);
+        }
 
+out5:
         munmap(dest_map, st.st_size);
 out4:
         close(dest_fd);
